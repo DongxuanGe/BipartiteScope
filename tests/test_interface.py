@@ -4,6 +4,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from bipartite_scope.interface import build_parser, run
 
@@ -182,6 +183,92 @@ class InterfaceTests(unittest.TestCase):
         self.assertFalse(result["dense_user_by_user_matrix_materialized"])
         self.assertGreaterEqual(result["full_build_seconds"], 0)
         self.assertGreaterEqual(result["incremental_build_seconds"], 0)
+
+    def test_scheduler_uses_the_celery_beat_command(self) -> None:
+        application = MagicMock()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve() / "workspaces"
+            with (
+                patch("bipartite_scope.tasks.configure_worker", return_value=application),
+                patch.dict(
+                    "os.environ",
+                    {
+                        "BIPARTITE_SCOPE_WORKSPACE_ROOT": str(root),
+                        "BIPARTITE_SCOPE_DATABASE_URL": f"sqlite+pysqlite:///{Path(directory).resolve() / 'service.sqlite3'}",
+                    },
+                ),
+            ):
+                code = run(build_parser().parse_args(["scheduler"]))
+            self.assertEqual(code, 0)
+            application.start.assert_called_once_with(
+                [
+                    "beat",
+                    "--loglevel=INFO",
+                    f"--schedule={root / '.operations' / 'celerybeat-schedule'}",
+                ]
+            )
+
+    def test_operations_and_backup_cli_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "workspaces"
+            workspace = root / "demo"
+            configuration = base / "service.toml"
+            database_url = f"sqlite+pysqlite:///{base / 'service.sqlite3'}"
+            configuration.write_text(
+                f"[service]\nworkspace_root={json.dumps(str(root))}\n"
+                f"[database]\nurl={json.dumps(database_url)}\n"
+                f"[backup]\nroot={json.dumps(str(base / 'backups'))}\n"
+                "[resources]\nmin_free_bytes=0\n",
+                encoding="utf-8",
+            )
+            self.execute("init", str(workspace))
+            self.execute(
+                "workspace",
+                "--config",
+                str(configuration),
+                "register",
+                "--workspace",
+                str(workspace),
+                "--id",
+                "demo",
+            )
+            code, summary = self.execute("operations", "--config", str(configuration), "summary")
+            self.assertEqual(code, 0)
+            self.assertEqual(summary["workspace_count"], 1)
+            code, backup = self.execute(
+                "backup", "--config", str(configuration), "create", "--workspace", str(workspace)
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(backup["status"], "succeeded")
+            code, listed = self.execute("backup", "--config", str(configuration), "list")
+            self.assertEqual(code, 0)
+            self.assertEqual(listed["backups"][0]["backup_id"], backup["backup_id"])
+            for operation in ("verify", "drill"):
+                code, checked = self.execute(
+                    "backup", "--config", str(configuration), operation, "--backup", backup["path"]
+                )
+                self.assertEqual(code, 0)
+                self.assertTrue(checked["verified"])
+            code, restored = self.execute(
+                "backup",
+                "--config",
+                str(configuration),
+                "restore",
+                "--backup",
+                backup["path"],
+                "--target",
+                str(base / "restored"),
+            )
+            self.assertEqual(code, 0)
+            self.assertTrue(restored["restored"])
+            self.assertTrue((base / "restored" / "bipartitescope.toml").is_file())
+            code, audit = self.execute("operations", "--config", str(configuration), "audit")
+            self.assertEqual(code, 0)
+            actions = {entry["payload"]["action"] for entry in audit["records"]}
+            self.assertTrue(
+                {"backup.create", "backup.verify", "backup.drill", "backup.restore"} <= actions
+            )
 
 
 if __name__ == "__main__":

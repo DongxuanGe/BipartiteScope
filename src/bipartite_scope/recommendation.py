@@ -26,6 +26,7 @@ from .core import (
     build_snapshot,
     rowwise_top_k,
 )
+from .reliability import workspace_mutation
 from .storage import (
     SnapshotIntegrityError,
     SnapshotStore,
@@ -264,6 +265,7 @@ def _apply_events(
     return graph, interaction_weights, affinity, stats
 
 
+@workspace_mutation
 def update_from_events(
     workspace: Workspace,
     events: Iterable[Event],
@@ -554,6 +556,7 @@ def _baseline_rankings(
     return popularity, cooccurrence_results
 
 
+@workspace_mutation
 def evaluate(
     workspace: Workspace,
     snapshot_id: str | None = None,

@@ -15,16 +15,56 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: python -m pip install -e '.[train,api,dev]'
+      - run: python -m pip install --index-url https://download.pytorch.org/whl/cpu 'torch>=2.2'
+      - run: python -m pip install -e '.[service,dev]'
+      - run: python -m pip check
       - run: python -m ruff check .
-      - run: python -m py_compile src/bipartite_scope/*.py
+      - run: python -m compileall -q src migrations tests
       - run: python -m unittest discover -s tests -v
       - run: python -m build
       - run: python -m pip install --force-reinstall --no-deps dist/*.whl
-      - run: bipartite-scope --version && python -c "import bipartite_scope; assert bipartite_scope.__version__ == '2.0.0'"
+      - name: Verify installed migrations outside the checkout
+        run: |
+          cd "$(mktemp -d)"
+          export PYTHONPATH=""
+          export BIPARTITE_SCOPE_DATABASE_URL="sqlite+pysqlite:///$PWD/service.sqlite3"
+          export BIPARTITE_SCOPE_WORKSPACE_ROOT="$PWD/workspaces"
+          bipartite-scope --version
+          bipartite-scope database upgrade
+          python - <<'PY'
+          import os
+          import sqlite3
+          from pathlib import Path
+          import bipartite_scope
+
+          assert bipartite_scope.__version__ == "4.0.0"
+          assert Path(os.environ["GITHUB_WORKSPACE"]) not in Path(bipartite_scope.__file__).resolve().parents
+          with sqlite3.connect("service.sqlite3") as connection:
+              assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0002_v4_operations"
+              tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+              assert {"workspaces", "jobs", "operations"} <= tables
+          PY
+      - name: Verify isolated core and API installations
+        run: |
+          wheel="$(python -c 'from pathlib import Path; print(next(Path("dist").glob("*.whl")).resolve())')"
+          smoke_root="$(mktemp -d)"
+          python -m venv "$smoke_root/venv"
+          "$smoke_root/venv/bin/python" -m pip install "$wheel"
+          cd "$smoke_root"
+          export PYTHONPATH=""
+          "$smoke_root/venv/bin/bipartite-scope" --version
+          "$smoke_root/venv/bin/bipartite-scope" init "$smoke_root/workspace"
+          "$smoke_root/venv/bin/python" -c 'from bipartite_scope import BuildConfig, CanonicalBipartiteGraph; assert BuildConfig(); assert CanonicalBipartiteGraph.from_edges_and_features([("u","i")], {"u":[1]}).incidence.nnz == 1'
+          "$smoke_root/venv/bin/python" -m pip install "${wheel}[api]"
+          "$smoke_root/venv/bin/python" - <<'PY'
+          from pathlib import Path
+          from bipartite_scope import create_app
+
+          application = create_app(Path.cwd() / "api-workspaces")
+          assert any(route.path == "/health" for route in application.routes)
+          PY
       - name: Enforce repository policies
         run: |
-          test "$(find src/bipartite_scope -type f -name '*.py' | wc -l | tr -d ' ')" = "5"
           test ! -d docs
           test -f DOCUMENTATION.md
           test "$(git ls-files '*DOCUMENTATION.md' | wc -l | tr -d ' ')" = "1"
@@ -32,6 +72,32 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           import subprocess
+
+          expected_package_files = {
+              "__init__.py",
+              "api.py",
+              "config.py",
+              "core.py",
+              "database.py",
+              "interface.py",
+              "maintenance.py",
+              "observability.py",
+              "policies.py",
+              "recommendation.py",
+              "reliability.py",
+              "storage.py",
+              "tasks.py",
+          }
+          actual_package_files = {
+              path.relative_to(Path("src/bipartite_scope")).as_posix()
+              for path in Path("src/bipartite_scope").rglob("*.py")
+          }
+          if actual_package_files != expected_package_files:
+              missing = sorted(expected_package_files - actual_package_files)
+              unexpected = sorted(actual_package_files - expected_package_files)
+              raise SystemExit(
+                  f"Package layout mismatch; missing={missing}, unexpected={unexpected}"
+              )
 
           files = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
           offenders = []
@@ -41,7 +107,13 @@ jobs:
                   text = path.read_text(encoding="utf-8")
               except (UnicodeDecodeError, IsADirectoryError):
                   continue
-              if any("\u3400" <= character <= "\u9fff" for character in text):
+              if any(
+                  0x3400 <= ord(character) <= 0x4DBF
+                  or 0x4E00 <= ord(character) <= 0x9FFF
+                  or 0xF900 <= ord(character) <= 0xFAFF
+                  or 0x20000 <= ord(character) <= 0x323AF
+                  for character in text
+              ):
                   offenders.append(name)
           if offenders:
               raise SystemExit("Han characters found in: " + ", ".join(offenders))

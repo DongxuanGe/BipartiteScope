@@ -3,7 +3,13 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .venv/
+.env
 artifacts/
 build/
 dist/
 *.egg-info/
+*.db
+*.sqlite
+*.sqlite3
+celerybeat-schedule*
+workspaces/

@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import numpy as np
 from scipy import sparse
@@ -30,6 +31,7 @@ from .core import (
     QueryConfig,
     RecommendationConfig,
 )
+from .reliability import execution_commit, execution_mutation, snapshot_mutation, workspace_mutation
 
 CONFIG_FILENAME = "bipartitescope.toml"
 EVENT_TYPES = frozenset({"view", "click", "favorite", "purchase", "rating", "dislike", "remove"})
@@ -373,9 +375,10 @@ class Workspace:
         return load_csv_graph(edges, features, delimiter=delimiter)
 
 
+@workspace_mutation
 def init_workspace(root: str | Path) -> Path:
     target = Path(root).resolve()
-    if target.exists() and any(target.iterdir()):
+    if target.exists() and any(path.name != ".write.lock" for path in target.iterdir()):
         raise FileExistsError(f"workspace is not empty: {target}")
     target.mkdir(parents=True, exist_ok=True)
     for name in ("data", "artifacts", "exports", "reports"):
@@ -417,6 +420,8 @@ def _event_payload(event: Event) -> dict[str, Any]:
     return asdict(event)
 
 
+@workspace_mutation
+@execution_mutation
 def register_events(
     workspace: Workspace,
     events: Iterable[Event],
@@ -480,6 +485,8 @@ def all_events(workspace: Workspace) -> tuple[Event, ...]:
     return tuple(normalize_event(json.loads(row[0])) for row in rows)
 
 
+@workspace_mutation
+@execution_mutation
 def mark_events_applied(
     workspace: Workspace,
     event_ids: Sequence[str],
@@ -554,9 +561,17 @@ class SnapshotStore:
         self.root = Path(root)
 
     def _target(self, snapshot_id: str) -> Path:
-        if not snapshot_id or Path(snapshot_id).name != snapshot_id:
+        if (
+            not snapshot_id
+            or snapshot_id in {".", "..", "lineage"}
+            or Path(snapshot_id).name != snapshot_id
+            or "\\" in snapshot_id
+        ):
             raise ValueError("invalid snapshot identifier")
-        return self.root / snapshot_id
+        target = self.root / snapshot_id
+        if target.is_symlink() or target.resolve().parent != self.root.resolve():
+            raise SnapshotIntegrityError("snapshot path escapes the snapshot store")
+        return target
 
     def _write_assets(self, directory: Path, snapshot: ModelSnapshot) -> None:
         sparse.save_npz(directory / "A.npz", snapshot.graph.incidence)
@@ -570,6 +585,7 @@ class SnapshotStore:
         np.save(directory / "semantic_scores.npy", snapshot.neighbor_scores, allow_pickle=False)
         np.savez_compressed(directory / "model.npz", **snapshot.model_state)
 
+    @snapshot_mutation
     def save(self, snapshot: ModelSnapshot, *, activate: bool = False) -> Path:
         self.root.mkdir(parents=True, exist_ok=True)
         target = self._target(snapshot.snapshot_id)
@@ -588,7 +604,8 @@ class SnapshotStore:
             manifest = {
                 "snapshot_id": snapshot.snapshot_id,
                 "created_at": snapshot.created_at,
-                "core_version": "2.0.0",
+                "core_version": "4.0.0",
+                "asset_schema_version": 2,
                 "schema_version": snapshot.config.schema_version,
                 "complete": True,
                 "input_hash": _hash_graph(snapshot),
@@ -608,7 +625,8 @@ class SnapshotStore:
             (temporary / "manifest.json").write_text(
                 json.dumps(manifest, indent=2), encoding="utf-8"
             )
-            os.replace(temporary, target)
+            with execution_commit():
+                os.replace(temporary, target)
             if activate:
                 self.activate(snapshot.snapshot_id)
         except Exception:
@@ -633,7 +651,11 @@ class SnapshotStore:
         assets = manifest.get("assets")
         if not isinstance(assets, dict) or not assets:
             raise SnapshotIntegrityError("snapshot manifest has no asset integrity data")
-        required = self._V2_ASSETS if manifest.get("core_version") == "2.0.0" else self._V1_ASSETS
+        core_version = str(manifest.get("core_version", "1.0.0"))
+        asset_schema = (
+            1 if core_version.startswith("1.") else int(manifest.get("asset_schema_version", 2))
+        )
+        required = self._V2_ASSETS if asset_schema >= 2 else self._V1_ASSETS
         missing = set(required) - set(assets)
         if missing:
             raise SnapshotIntegrityError(
@@ -641,6 +663,13 @@ class SnapshotStore:
             )
         for name, expected in assets.items():
             path = target / name
+            if (
+                not isinstance(name, str)
+                or Path(name).name != name
+                or "\\" in name
+                or path.is_symlink()
+            ):
+                raise SnapshotIntegrityError("snapshot manifest contains an unsafe asset path")
             if not isinstance(expected, dict) or not path.is_file():
                 raise SnapshotIntegrityError(f"snapshot asset is missing: {name}")
             if path.stat().st_size != expected.get("bytes") or _sha256(path) != expected.get(
@@ -718,7 +747,11 @@ class SnapshotStore:
     def recover(self, snapshot_id: str) -> ModelSnapshot:
         target, manifest = self._manifest(snapshot_id)
         assets = manifest.get("assets")
-        required = self._V2_ASSETS if manifest.get("core_version") == "2.0.0" else self._V1_ASSETS
+        core_version = str(manifest.get("core_version", "1.0.0"))
+        asset_schema = (
+            1 if core_version.startswith("1.") else int(manifest.get("asset_schema_version", 2))
+        )
+        required = self._V2_ASSETS if asset_schema >= 2 else self._V1_ASSETS
         if not isinstance(assets, dict):
             raise SnapshotIntegrityError("snapshot recovery requires asset integrity data")
         for name in set(required) - {"W.npz"}:
@@ -768,12 +801,14 @@ class SnapshotStore:
         self.verify(snapshot_id)
         return snapshot_id
 
+    @snapshot_mutation
     def activate(self, snapshot_id: str) -> str:
         self.verify(snapshot_id)
         self.root.mkdir(parents=True, exist_ok=True)
-        temporary = self.root / f".latest.{os.getpid()}.tmp"
+        temporary = self.root / f".latest.{os.getpid()}.{uuid4().hex}.tmp"
         temporary.write_text(json.dumps({"snapshot_id": snapshot_id}), encoding="utf-8")
-        os.replace(temporary, self.root / "latest.json")
+        with execution_commit():
+            os.replace(temporary, self.root / "latest.json")
         return snapshot_id
 
     def rollback(self, snapshot_id: str) -> str:
@@ -789,7 +824,7 @@ class SnapshotStore:
         if not self.root.exists():
             return ()
         for path in sorted(self.root.iterdir()):
-            if not path.is_dir() or path.name.startswith("."):
+            if not path.is_dir() or path.name.startswith(".") or path.name == "lineage":
                 continue
             try:
                 _, manifest = self._manifest(path.name)

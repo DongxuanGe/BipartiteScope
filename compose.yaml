@@ -1,0 +1,118 @@
+name: bipartite-scope
+
+x-service-environment: &service-environment
+  BIPARTITE_SCOPE_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-bipartite_scope}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-bipartite_scope}
+  BIPARTITE_SCOPE_REDIS_BROKER_URL: redis://redis:6379/0
+  BIPARTITE_SCOPE_REDIS_RESULT_URL: redis://redis:6379/1
+  BIPARTITE_SCOPE_REDIS_PROGRESS_URL: redis://redis:6379/2
+  BIPARTITE_SCOPE_WORKSPACE_ROOT: /var/lib/bipartite-scope/workspaces
+  BIPARTITE_SCOPE_HOST: 0.0.0.0
+  BIPARTITE_SCOPE_PORT: "8000"
+  BIPARTITE_SCOPE_ALLOW_INSECURE_REMOTE: "true"
+  BIPARTITE_SCOPE_WORKER_CONCURRENCY: ${BIPARTITE_SCOPE_WORKER_CONCURRENCY:-2}
+  BIPARTITE_SCOPE_SCHEDULER_ENABLED: ${BIPARTITE_SCOPE_SCHEDULER_ENABLED:-true}
+  BIPARTITE_SCOPE_INCREMENTAL_UPDATE_ENABLED: ${BIPARTITE_SCOPE_INCREMENTAL_UPDATE_ENABLED:-false}
+
+x-application: &application
+  build:
+    context: .
+  environment: *service-environment
+  volumes:
+    - workspace_data:/var/lib/bipartite-scope/workspaces
+  restart: unless-stopped
+  init: true
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-bipartite_scope}
+      POSTGRES_USER: ${POSTGRES_USER:-bipartite_scope}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  migrate:
+    <<: *application
+    command: ["bipartite-scope", "database", "upgrade"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    healthcheck:
+      disable: true
+
+  api:
+    <<: *application
+    command: ["bipartite-scope", "serve"]
+    ports:
+      - "127.0.0.1:${BIPARTITE_SCOPE_PORT:-8000}:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v3/health/ready', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 10
+
+  worker:
+    <<: *application
+    command: ["bipartite-scope", "worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    stop_grace_period: 45s
+    healthcheck:
+      disable: true
+
+  scheduler:
+    <<: *application
+    command: ["bipartite-scope", "scheduler"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+
+volumes:
+  postgres_data:
+  redis_data:
+  workspace_data:

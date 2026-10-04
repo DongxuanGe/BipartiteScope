@@ -37,7 +37,7 @@ def config(epochs: int = 2) -> BuildConfig:
 
 class CoreTests(unittest.TestCase):
     def test_version_and_supported_imports(self) -> None:
-        self.assertEqual(bipartite_scope.__version__, "2.0.0")
+        self.assertEqual(bipartite_scope.__version__, "4.0.0")
         self.assertTrue(callable(bipartite_scope.create_app))
 
     def test_graph_is_binary_sparse_and_deterministic(self) -> None:

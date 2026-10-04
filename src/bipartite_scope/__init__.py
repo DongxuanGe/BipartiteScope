@@ -39,7 +39,7 @@ from .storage import (
     normalize_event,
 )
 
-__version__ = "2.0.0"
+__version__ = "4.0.0"
 
 __all__ = [
     "AcademicExplorerAdapter",
@@ -61,6 +61,8 @@ __all__ = [
     "RecommendationConfig",
     "RecommendationItem",
     "RecommendationResult",
+    "ServiceDatabase",
+    "ServiceSettings",
     "SnapshotIntegrityError",
     "SnapshotStore",
     "UpdateResult",
@@ -68,6 +70,7 @@ __all__ = [
     "Workspace",
     "build_snapshot",
     "create_app",
+    "create_service_app",
     "evaluate",
     "init_workspace",
     "load_events",
@@ -77,3 +80,19 @@ __all__ = [
     "record_feedback",
     "update_snapshot",
 ]
+
+
+def __getattr__(name: str):
+    if name == "ServiceSettings":
+        from .config import ServiceSettings
+
+        return ServiceSettings
+    if name == "ServiceDatabase":
+        from .database import ServiceDatabase
+
+        return ServiceDatabase
+    if name == "create_service_app":
+        from .api import create_service_app
+
+        return create_service_app
+    raise AttributeError(name)
