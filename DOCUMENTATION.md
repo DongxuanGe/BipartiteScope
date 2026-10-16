@@ -4,6 +4,37 @@ BipartiteScope 4.0.0 combines attributed bipartite graph analysis, incremental u
 
 V4 is intended for one trusted personal operator on one local host. It uses local workspaces and a shared filesystem, with no authentication, accounts, tenant isolation, or frontend. Bind the API to loopback. The release includes the service foundation developed under the V3 scope and supports upgrading directly from V2.
 
+## Contents
+
+- [Architecture](#architecture)
+- [Security and deployment boundaries](#security-and-deployment-boundaries)
+- [Installation](#installation)
+- [Workspace and data schemas](#workspace-and-data-schemas)
+- [Workspace algorithm configuration](#workspace-algorithm-configuration)
+- [Service and operation configuration](#service-and-operation-configuration)
+- [Python API](#python-api)
+- [CLI](#cli)
+- [Service HTTP API](#service-http-api)
+- [V4 operation HTTP API](#v4-operation-http-api)
+- [Asynchronous jobs and idempotency](#asynchronous-jobs-and-idempotency)
+- [Server-sent progress events](#server-sent-progress-events)
+- [V2 REST compatibility](#v2-rest-compatibility)
+- [Logs, audit, metrics, and alerts](#logs-audit-metrics-and-alerts)
+- [Resource admission and storage](#resource-admission-and-storage)
+- [Retention and recoverable cleanup](#retention-and-recoverable-cleanup)
+- [Consistent backup and recovery](#consistent-backup-and-recovery)
+- [Algorithm overview](#algorithm-overview)
+- [Incremental updates](#incremental-updates)
+- [Recommendation and feedback](#recommendation-and-feedback)
+- [Offline evaluation](#offline-evaluation)
+- [Snapshots and integrity](#snapshots-and-integrity)
+- [Migration from V2 or the V3 development service](#migration-from-v2-or-the-v3-development-service)
+- [Testing and repository policy](#testing-and-repository-policy)
+- [V4 limitations](#v4-limitations)
+- [Contributing](#contributing)
+- [Development roadmap](#development-roadmap)
+- [Troubleshooting](#troubleshooting)
+
 ## Architecture
 
 Service coordination is stored separately from graph and model files:
@@ -21,6 +52,44 @@ Service coordination is stored separately from graph and model files:
 The control database is not a graph database. Canonical graphs, weighted interactions, model states, and reports remain in workspace files. Progress is persisted in the control database; Redis accelerates notification but is not the event history. A workspace-local SQLite index tracks accepted events and applied batches separately from service jobs.
 
 Build and update jobs are serialized per workspace. File locks coordinate local writers, while execution generations prevent stale attempts from changing job state or publishing assets. The default global heavy-job limit is one. Synchronous inference reads immutable snapshots.
+
+## Security and deployment boundaries
+
+### Reporting a vulnerability
+
+Report suspected security issues privately to the repository maintainer or through a private GitHub security advisory when that feature is available. Do not open a public issue containing credentials, connection strings, private graph records, uploaded data, personally identifying information, or exploit details.
+
+Include the affected version, deployment mode, reproduction steps, expected impact, and any suggested mitigation. Do not access data that is not yours or test against a public deployment without authorization.
+
+### V4 deployment boundary
+
+BipartiteScope 4.0.0 is intended for one trusted personal operator. It has no authentication, authorization, account model, or tenant isolation. Anyone who can reach the API can operate its workspaces and management endpoints. Do not expose it directly to the public internet.
+
+The default service host is `127.0.0.1`. A non-loopback bind is rejected unless `allow_insecure_remote` is explicitly enabled. That setting only acknowledges the risk; it does not add security. If access beyond the local host is required, place the service behind a separately managed trusted gateway that provides TLS, authentication, authorization, request limits, and audit controls.
+
+Restrict filesystem access to the workspace root, service database, Redis state, backups, logs, and diagnostics. The retained optional Compose configuration publishes only the API on loopback and does not publish PostgreSQL or Redis. Containers are not required for V4; the same access boundary applies to directly launched processes.
+
+### Data and secret handling
+
+- Use environment injection or a protected local `.env` file for connection secrets. Never commit `.env` or production connection strings.
+- Configuration output redacts URL passwords, and operation logs and diagnostics redact recognized secret fields and credential patterns. Redaction is not a guarantee that arbitrary business data contains no sensitive information; review diagnostic files before sharing them.
+- Treat workspace inputs, normalized events, feedback, reports, exports, model assets, control-plane rows, and backups as sensitive application data.
+- Grant the API, worker, scheduler, PostgreSQL, and Redis only the filesystem and network access they require.
+- Use encrypted storage and encrypted backups when local policy requires them; encryption at rest is not supplied by the application.
+- Retention moves eligible files to recoverable quarantine. Explicit trash purge permanently deletes validated expired quarantine bundles and cannot be undone by the application.
+- Backups are local integrity-checked directory bundles, not encrypted or signed archives. Store independent protected copies if the source disk is the only backup location.
+
+### Implemented safeguards
+
+Workspace identifiers and resolved paths are validated. Uploads use generated identifiers, restricted extensions, byte limits, and SHA-256 digests. Snapshots are verified before activation. Write locks coordinate local workspace changes; job heartbeats and execution generations reject stale attempts. Queue, heavy-job, disk, and storage admission limits reduce accidental overload.
+
+Retention plans are hashed, checked against current protection, and rejected when targets change. Active, pinned, rollback, and pending-task assets are protected. Purge accepts only validated quarantine bundles. Backup verification checks allowed relative paths, exact inventories, hashes, snapshot state, and event-index consistency. Restoration requires a new target and does not replay interrupted tasks automatically.
+
+These controls assume trusted local files and processes. They do not provide an authorization boundary, malware scanning, sandboxed numerical execution, or distributed isolation. Only accept data and configuration from the trusted operator.
+
+### Dependency and release hygiene
+
+Run the supported Python versions, update the selected database and Redis dependencies, and review migration guidance before upgrading. Verify backups and complete a recovery drill before relying on a backup. A passing readiness check confirms dependency availability, not authorization or public-exposure safety.
 
 ## Installation
 
@@ -652,7 +721,7 @@ CI targets Python 3.11 and 3.12. Tests cover core mathematical behavior, data va
 
 Test data is generated under temporary directories. These checks do not establish production throughput or a live PostgreSQL/Redis deployment result; validate selected external services separately when using them.
 
-Repository policy requires thirteen package files: `__init__.py`, `api.py`, `config.py`, `core.py`, `database.py`, `interface.py`, `maintenance.py`, `observability.py`, `policies.py`, `recommendation.py`, `reliability.py`, `storage.py`, and `tasks.py`. Detailed guidance is consolidated here, with no repository `docs/` tree, no committed CSV/JSONL/NDJSON datasets, and English-only tracked text.
+Repository policy requires thirteen package files: `__init__.py`, `api.py`, `config.py`, `core.py`, `database.py`, `interface.py`, `maintenance.py`, `observability.py`, `policies.py`, `recommendation.py`, `reliability.py`, `storage.py`, and `tasks.py`. Repository documentation is limited to `README.md` and `DOCUMENTATION.md`. Detailed guidance is consolidated here, with no repository `docs/` tree, no committed CSV/JSONL/NDJSON datasets, and English-only tracked text.
 
 ## V4 limitations
 
@@ -669,6 +738,26 @@ Repository policy requires thirteen package files: `__init__.py`, `api.py`, `con
 - Backups and diagnostic exports are not encrypted or cryptographically signed.
 - Metrics and local alerts have no built-in external notification channel.
 - There is no frontend, public benchmark dataset, managed monitoring dashboard, or autoscaling policy.
+
+## Contributing
+
+Please open an issue before substantial changes. Contributions must keep the canonical core label-free and sparse, include focused tests, update `DOCUMENTATION.md` for behavior changes, and avoid committing user datasets or runtime event ledgers.
+
+## Development roadmap
+
+- [x] M0: public project skeleton, Apache-2.0, package metadata, CI-ready layout.
+- [x] M1: canonical graph and CSV validation (included in the first functional increment).
+- [x] M2: sparse structure-attribute affinity builder.
+- [x] M3: dual-view encoder and cut-guided offline trainer.
+- [x] M4: immutable snapshots and BLC online query with explanations.
+- [x] M5: CLI, REST API, adapters, and v0.1.0 core release.
+- [x] M6: workspace-first CLI, TOML configuration, input quality reports, and verified snapshots (v1.0.0 final release).
+- [x] M7: incremental updates, recommendation, feedback, evaluation, and snapshot promotion controls (v2.0.0).
+- [x] Service foundation developed under V3: typed configuration, SQLite/PostgreSQL control plane, Redis and Celery asynchronous jobs, versioned API, and resumable progress events. Included in the V4 release.
+- [x] V4: personal operation management, independent heartbeats and execution fencing, correlated logs and audit, persistent metrics and alerts, resource admission, safe retention, consistent backups, new-target recovery, and restore drills.
+- [ ] V5: complete frontend, backend integration, large-scale performance, and closed-loop model operations.
+
+The current scope uses local workspaces and a shared filesystem. Authentication, multi-user administration, tenant isolation, and object storage are not part of V4. Future roadmap items are development targets, not delivered capabilities.
 
 ## Troubleshooting
 

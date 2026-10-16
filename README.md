@@ -30,7 +30,7 @@ bipartite-scope operations summary
 
 Run the API, worker, and scheduler against the same configuration and local workspace root. Redis is required for broker-backed asynchronous execution. Docker is optional and is not required for the V4 workflow.
 
-See [DOCUMENTATION.md](DOCUMENTATION.md) for installation, data schemas, configuration, Python API, CLI, HTTP API, algorithms, operation management, backup and recovery, migration, testing, and troubleshooting.
+See [DOCUMENTATION.md](DOCUMENTATION.md) for installation, data schemas, configuration, Python API, CLI, HTTP API, algorithms, operation management, backup and recovery, migration, testing, troubleshooting, security, contributing, and the development roadmap. Review [security and deployment boundaries](DOCUMENTATION.md#security-and-deployment-boundaries) before running the service.
 
 Source and releases: [DongxuanGe/BipartiteScope](https://github.com/DongxuanGe/BipartiteScope).
 

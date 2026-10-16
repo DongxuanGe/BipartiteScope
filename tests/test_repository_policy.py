@@ -28,6 +28,10 @@ class RepositoryPolicyTests(unittest.TestCase):
         self.assertFalse((root / "docs").exists())
         self.assertTrue((root / "DOCUMENTATION.md").is_file())
         self.assertEqual(len(list(root.rglob("DOCUMENTATION.md"))), 1)
+        self.assertEqual(
+            {path.name for path in root.glob("*.md")},
+            {"README.md", "DOCUMENTATION.md"},
+        )
 
     def test_repository_text_is_english_and_contains_no_dataset_files(self) -> None:
         root = Path(__file__).resolve().parents[1]
